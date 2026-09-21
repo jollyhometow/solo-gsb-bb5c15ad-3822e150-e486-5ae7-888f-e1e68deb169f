@@ -1,0 +1,17 @@
+{
+  "name": "focus-route-lab",
+  "version": "1.0.0",
+  "description": "键盘焦点路线实验室：在 sandbox iframe 中预览用户 HTML/CSS，计算 Tab/Shift+Tab 焦点顺序并给出诊断",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/analyzer.test.js && node test/diff.test.js",
+    "smoke": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>键盘焦点路线实验室</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>⌨️ 键盘焦点路线实验室</h1>
+    <p class="subtitle">粘贴 HTML / CSS → sandbox 预览 → 推导 Tab / Shift+Tab 焦点顺序 → 逐步高亮与诊断</p>
+  </header>
+
+  <main class="layout">
+    <!-- 左：编辑器 -->
+    <section class="panel editors" aria-label="代码编辑区">
+      <div class="panel-title">
+        <h2>输入</h2>
+        <div class="actions">
+          <label class="auto-toggle">
+            <input type="checkbox" id="auto-apply" checked> 自动重算
+          </label>
+          <button id="apply-btn" class="btn primary" type="button">应用并重算</button>
+        </div>
+      </div>
+      <label class="editor-label" for="html-input">HTML</label>
+      <textarea id="html-input" spellcheck="false" wrap="off"></textarea>
+      <label class="editor-label" for="css-input">CSS</label>
+      <textarea id="css-input" spellcheck="false" wrap="off" class="css-editor"></textarea>
+    </section>
+
+    <!-- 中：sandbox 预览 + 步进控制 -->
+    <section class="panel preview" aria-label="预览区">
+      <div class="panel-title">
+        <h2>预览（sandbox iframe）</h2>
+        <span id="preview-status" class="status">等待输入…</span>
+      </div>
+      <!-- 关键：仅 allow-scripts，不授予 allow-same-origin；用户脚本已在注入前剥离 -->
+      <iframe id="preview-frame" sandbox="allow-scripts" title="用户代码预览"></iframe>
+      <div class="stepper">
+        <button id="prev-btn" class="btn" type="button" title="Shift+Tab">⇤ Shift+Tab</button>
+        <button id="step-capture" class="btn capture" type="button"
+                title="点击聚焦此按钮后，按 Tab / Shift+Tab 步进">
+          <span id="step-indicator">– / –</span> · 点此捕获 Tab
+        </button>
+        <button id="next-btn" class="btn" type="button" title="Tab">Tab ⇥</button>
+      </div>
+      <p id="restore-hint" class="restore-hint" role="status"></p>
+    </section>
+
+    <!-- 右：路线与诊断 -->
+    <section class="panel results" aria-label="结果区">
+      <div class="panel-title">
+        <h2>焦点路线</h2>
+        <button id="export-btn" class="btn" type="button">导出 JSON</button>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab active" id="tab-order" role="tab" aria-selected="true" type="button">顺序 <span id="order-count" class="count">0</span></button>
+        <button class="tab" id="tab-excluded" role="tab" aria-selected="false" type="button">排除与诊断 <span id="excluded-count" class="count">0</span></button>
+        <button class="tab" id="tab-modal" role="tab" aria-selected="false" type="button">模态审计 <span id="modal-count" class="count">0</span></button>
+        <button class="tab" id="tab-baseline" role="tab" aria-selected="false" type="button">基线对比 <span id="baseline-count" class="count">0</span></button>
+      </div>
+      <ol id="order-list" class="order-list" aria-label="Tab 顺序"></ol>
+      <div id="excluded-panel" class="excluded-panel" hidden>
+        <ul id="excluded-list" class="excluded-list"></ul>
+        <h3>全局诊断</h3>
+        <ul id="diagnostics-list" class="diagnostics-list"></ul>
+      </div>
+      <div id="modal-panel" class="modal-panel" hidden>
+        <div id="modal-head" class="modal-head"></div>
+        <h3>焦点循环路线（模态内 Tab 顺序）</h3>
+        <ol id="modal-cycle-list" class="modal-cycle-list"></ol>
+        <p id="modal-cycle-wrap" class="cycle-wrap"></p>
+        <h3>泄漏节点（模态外仍可 Tab 到达）</h3>
+        <ul id="modal-leak-list" class="modal-leak-list"></ul>
+        <h3>审计诊断</h3>
+        <ul id="modal-diagnostics-list" class="diagnostics-list"></ul>
+        <p id="modal-hint" class="diff-hint" role="status"></p>
+      </div>
+      <div id="baseline-panel" class="baseline-panel" hidden>
+        <div class="baseline-toolbar">
+          <button id="pin-baseline-btn" class="btn primary" type="button">📌 钉当前为基线</button>
+          <button id="clear-baseline-btn" class="btn" type="button" hidden>清除基线</button>
+        </div>
+        <p id="baseline-meta" class="baseline-meta"></p>
+        <div id="diff-summary" class="diff-summary"></div>
+        <ul id="diff-list" class="diff-list"></ul>
+        <p id="diff-hint" class="diff-hint" role="status"></p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/diff.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

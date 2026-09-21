@@ -1,0 +1,11 @@
+services:
+  focus-route-lab:
+    build: .
+    image: focus-route-lab:latest
+    container_name: focus-route-lab
+    ports:
+      - "3000:3000"
+    environment:
+      # 容器内监听端口；若修改，请同步调整 ports 映射
+      - PORT=3000
+    restart: unless-stopped
