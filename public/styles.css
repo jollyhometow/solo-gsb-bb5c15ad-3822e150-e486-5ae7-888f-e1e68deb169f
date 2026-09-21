@@ -201,6 +201,14 @@ textarea:focus { outline: 2px solid var(--accent-2); outline-offset: -1px; }
 }
 .badge.positive { background: #3d2b12; color: var(--warn); }
 
+/* Shadow DOM / slot 组合位置徽章 */
+.badge.shadow-host { background: #22304d; color: var(--accent-2); }
+.badge.slot-slotted { background: #12352b; color: var(--ok); }
+.badge.slot-forward { background: #12352b; color: var(--ok); }
+.badge.slot-fallback { background: #2d2440; color: #c792ea; }
+.badge.slot-unassigned { background: #3a2333; color: var(--accent); }
+.badge.shadow-closed { background: #3a2333; color: var(--accent); font-weight: 700; }
+
 .reason {
   display: inline-block;
   margin: 2px 6px 0 0;

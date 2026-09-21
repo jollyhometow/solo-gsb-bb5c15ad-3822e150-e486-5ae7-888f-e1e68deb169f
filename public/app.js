@@ -20,6 +20,15 @@
 
   var SOURCE = 'focus-lab';
 
+  // 与 analyzer.js 中一致：净化时给 closed shadow root 宿主打的标记。
+  // closed 根在解析后无法从 JS 探测（el.shadowRoot === null），
+  // 只能在声明式模板被浏览器接管前于宿主上留下记号。
+  var CLOSED_MARKER = 'data-focus-lab-closed-shadow';
+  // DSD 属性在「净化 / 二次解析」阶段使用的中性替身（避免模板提前被接管），
+  // 最终写入 srcdoc 前再还原为 shadowrootmode / shadowrootdelegatesfocus。
+  var DSD_MODE_TOKEN = 'data-frl-shadowrootmode';
+  var DSD_DELEGATES_TOKEN = 'data-frl-shadowrootdelegatesfocus';
+
   var els = {
     html: document.getElementById('html-input'),
     css: document.getElementById('css-input'),
@@ -79,9 +88,42 @@
   /* ---------------- 示例输入 ---------------- */
 
   var SAMPLE_HTML = [
-    '<h1>示例：注册表单</h1>',
+    '<h1>示例：注册表单 + Shadow DOM 组件</h1>',
     '<button>第一个按钮</button>',
     '<a href="#">普通链接</a>',
+    '',
+    '<!-- open Shadow Root：slot 分配的轻 DOM 进入组合树；未分配 slot 用 fallback -->',
+    '<x-card>',
+    '  <template shadowrootmode="open">',
+    '    <style>:host{display:block;border:2px solid #4f8cff;border-radius:8px;padding:8px;margin:8px 0;background:#eef4ff}</style>',
+    '    <h3><slot name="title"></slot></h3>',
+    '    <slot></slot>',
+    '    <slot name="footer"><button>未分配 footer 时的 fallback 按钮</button></slot>',
+    '    <button>shadow 内部按钮</button>',
+    '  </template>',
+    '  <span slot="title">卡片标题（slotted span，不可聚焦）</span>',
+    '  <a slot="footer" href="#">footer 槽分配的链接</a>',
+    '  <button slot="footer">同样分配到 footer 槽的按钮</button>',
+    '  <button>分配到默认槽的按钮</button>',
+    '  <button data-unassigned>未被任何 slot 分配的宿主按钮（不渲染、不计数）</button>',
+    '</x-card>',
+    '',
+    '<!-- open + delegatesFocus：宿主停靠焦点委托给 shadow 内部 -->',
+    '<x-delegate tabindex="0">',
+    '  <template shadowrootmode="open" shadowrootdelegatesfocus>',
+    '    <button>delegatesFocus：内部首个可聚焦节点</button>',
+    '  </template>',
+    '</x-delegate>',
+    '',
+    '<!-- closed Shadow Root：内部不可检查，宿主轻 DOM 标为「不可确定」 -->',
+    '<x-secret>',
+    '  <template shadowrootmode="closed">',
+    '    <button>closed 根内部按钮（实验室无法看到）</button>',
+    '    <slot></slot>',
+    '  </template>',
+    '  <button>closed 宿主轻 DOM 按钮（slot 分配不可知）</button>',
+    '</x-secret>',
+    '',
     '<input type="text" placeholder="用户名">',
     '<button tabindex="3">正数 tabindex=3</button>',
     '<button tabindex="1">正数 tabindex=1（插队到最前）</button>',
@@ -116,12 +158,72 @@
   var SAMPLE_CSS = [
     'body { font-family: sans-serif; padding: 12px; }',
     'button, a, input, summary, div[tabindex] { display: inline-block; margin: 4px; padding: 4px 8px; }',
+    'x-card, x-secret, x-delegate { display: block; }',
     '.gone { display: none; }',
     '.demo-modal { display: block; margin: 8px 0; padding: 10px; border: 2px solid #4f8cff; border-radius: 6px; background: #eef4ff; }',
     ':focus { outline: 2px dashed #4f8cff; }'
   ].join('\n');
 
-  /* ---------------- 净化：剥离用户脚本 ---------------- */
+  /* ---------------- 净化：剥离用户脚本（保留声明式 Shadow DOM） ---------------- */
+
+  /**
+   * 把 <template> 开标签中的 DSD 属性改为中性替身（大小写不敏感）：
+   *  - shadowrootmode                          → data-frl-shadowrootmode="open|closed"
+   *  - shadowrootdelegatesfocus                → data-frl-shadowrootdelegatesfocus=""
+   * 这样经 DOMParser 解析时模板只是普通元素（保留在宿主轻 DOM 中，可被遍历净化），
+   * 最终拼装 srcdoc 时再由 restoreDsdTokens 还原，浏览器才真正创建 shadow root。
+   */
+  function neutralizeDsd(html) {
+    var TAG_RE = /<template\b[^>]*>/gi;
+    function neutralizeTag(tag) {
+      if (!/\bshadowrootmode\b/i.test(tag) && !/\bshadowrootdelegatesfocus\b/i.test(tag)) return tag;
+      var out = tag.replace(/\bshadowrootmode\s*(?:=\s*("[^"]*"|'[^']*'|[^\s>]+))?/i, function (_, val) {
+        var mode = 'open';
+        if (val) {
+          var v = val.replace(/^['"]|['"]$/g, '').toLowerCase();
+          if (v === 'closed') mode = 'closed';
+        }
+        return DSD_MODE_TOKEN + '="' + mode + '"';
+      });
+      out = out.replace(/\bshadowrootdelegatesfocus(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/i,
+        DSD_DELEGATES_TOKEN + '=""');
+      return out;
+    }
+    return html.replace(TAG_RE, neutralizeTag);
+  }
+
+  /** 遍历 <template> 内容（含嵌套），补充净化脚本与事件属性（覆盖 shadow 子树） */
+  function sanitizeTemplates(doc) {
+    var templates = doc.querySelectorAll('template');
+    for (var t = 0; t < templates.length; t++) {
+      var content = templates[t].content;
+      if (!content) continue;
+      var kill = content.querySelectorAll('script, base, meta[http-equiv]');
+      for (var i = 0; i < kill.length; i++) kill[i].remove();
+      var inner = content.querySelectorAll('*');
+      for (var j = 0; j < inner.length; j++) stripDangerousAttrs(inner[j]);
+    }
+  }
+
+  /** 移除单个元素上的 on* / srcdoc / 危险协议属性 */
+  function stripDangerousAttrs(el) {
+    var attrs = Array.prototype.slice.call(el.attributes);
+    for (var k = 0; k < attrs.length; k++) {
+      var name = attrs[k].name.toLowerCase();
+      var compact = String(attrs[k].value).replace(/[\s\x00-\x1F]+/g, '').toLowerCase();
+      if (name.indexOf('on') === 0) {
+        el.removeAttribute(attrs[k].name);
+      } else if (name === 'srcdoc') {
+        el.removeAttribute(attrs[k].name);
+      } else if (
+        (name === 'href' || name === 'src' || name === 'xlink:href' ||
+         name === 'formaction' || name === 'action' || name === 'poster') &&
+        (compact.indexOf('javascript:') === 0 || compact.indexOf('data:text/html') === 0)
+      ) {
+        el.removeAttribute(attrs[k].name);
+      }
+    }
+  }
 
   /**
    * 用 DOMParser 解析（不会执行脚本），移除：
@@ -129,33 +231,35 @@
    *  - 所有 on* 事件属性
    *  - javascript: / data:text/html 协议的链接类属性
    *  - srcdoc（防止注入未净化的嵌套文档）
+   * 同时保留（并净化其内容）声明式 Shadow DOM 模板。
    */
   function sanitizeHtml(html) {
-    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var doc = new DOMParser().parseFromString(neutralizeDsd(html), 'text/html');
     var kill = doc.querySelectorAll('script, base, meta[http-equiv]');
     for (var i = 0; i < kill.length; i++) kill[i].remove();
 
     var all = doc.querySelectorAll('*');
     for (var j = 0; j < all.length; j++) {
-      var el = all[j];
-      var attrs = Array.prototype.slice.call(el.attributes);
-      for (var k = 0; k < attrs.length; k++) {
-        var name = attrs[k].name.toLowerCase();
-        var compact = String(attrs[k].value).replace(/[\s\x00-\x1F]+/g, '').toLowerCase();
-        if (name.indexOf('on') === 0) {
-          el.removeAttribute(attrs[k].name);
-        } else if (name === 'srcdoc') {
-          el.removeAttribute(attrs[k].name);
-        } else if (
-          (name === 'href' || name === 'src' || name === 'xlink:href' ||
-           name === 'formaction' || name === 'action' || name === 'poster') &&
-          (compact.indexOf('javascript:') === 0 || compact.indexOf('data:text/html') === 0)
-        ) {
-          el.removeAttribute(attrs[k].name);
-        }
+      stripDangerousAttrs(all[j]);
+      // closed 声明式根：在宿主上留下标记（供 analyzer 明确「不可检查」）
+      if (all[j].hasAttribute(DSD_MODE_TOKEN) && all[j].getAttribute(DSD_MODE_TOKEN) === 'closed') {
+        var parent = all[j].parentElement;
+        if (parent && !parent.hasAttribute(CLOSED_MARKER)) parent.setAttribute(CLOSED_MARKER, '');
       }
     }
+    sanitizeTemplates(doc);
     return doc.documentElement.outerHTML;
+  }
+
+  /**
+   * 最终序列化前把中性替身还原为真实 DSD 属性（字符串层替换；
+   * 替身在正常用户内容中不会出现，避免提前被 DOMParser 接管成真 shadow root）。
+   */
+  function restoreDsdTokens(serialized) {
+    return serialized
+      .split(DSD_MODE_TOKEN + '="open"').join('shadowrootmode="open"')
+      .split(DSD_MODE_TOKEN + '="closed"').join('shadowrootmode="closed"')
+      .split(DSD_DELEGATES_TOKEN + '=""').join('shadowrootdelegatesfocus');
   }
 
   /** 拼装 srcdoc：净化 HTML + 用户 CSS + 分析脚本 */
@@ -167,7 +271,8 @@
     var script = doc.createElement('script');
     script.textContent = analyzerSrc;
     (doc.body || doc.documentElement).appendChild(script);
-    return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+    // 先序列化再还原 DSD：若在 DOM 中改名，序列化结果里的模板不会带 shadowrootmode
+    return '<!DOCTYPE html>\n' + restoreDsdTokens(doc.documentElement.outerHTML);
   }
 
   /* ---------------- 渲染与重算 ---------------- */
@@ -231,16 +336,26 @@
     state.currentStep = -1;
     renderResults();
     refreshDiff();
-    setStatus('已计算：' + state.order.length + ' 个可聚焦节点', 'ok');
+    var shNote = '';
+    if (state.stats && state.stats.shadow) {
+      var sh = state.stats.shadow;
+      var parts = [];
+      if (sh.openRoots > 0) parts.push(sh.openRoots + ' 个 open 根');
+      if (sh.closedRoots.length > 0) parts.push(sh.closedRoots.length + ' 个 closed（不可检查）');
+      if (sh.slottedCandidates > 0) parts.push(sh.slottedCandidates + ' 个经 slot 分配');
+      if (sh.fallbackCandidates > 0) parts.push(sh.fallbackCandidates + ' 个 fallback');
+      if (parts.length > 0) shNote = ' · 组合树：' + parts.join('，');
+    }
+    setStatus('已计算：' + state.order.length + ' 个可聚焦节点' + shNote, 'ok');
 
     // 按稳定选择器恢复编辑前的位置
     if (state.restoreSelector) {
       var idx = state.order.indexOf(state.restoreSelector);
       if (idx >= 0) {
-        els.restoreHint.textContent = '已按稳定选择器恢复到位置 ' + (idx + 1) + '：' + state.restoreSelector;
+        els.restoreHint.textContent = '已按分段选择器恢复到位置 ' + (idx + 1) + '：' + state.restoreSelector;
         sendToFrame({ type: 'highlight', step: idx });
       } else {
-        els.restoreHint.textContent = '原节点（' + state.restoreSelector + '）已不在 Tab 顺序中，未恢复。';
+        els.restoreHint.textContent = '原节点（' + state.restoreSelector + '）已不在 Tab 顺序中（或位于 closed 根内），未恢复。';
         updateStepUI();
       }
       state.restoreSelector = null;
@@ -261,6 +376,50 @@
       if (state.entries[i].selector === selector) return state.entries[i];
     }
     return null;
+  }
+
+  /**
+   * 在节点项上追加 Shadow DOM 组合位置徽章与说明：
+   * 宿主链（跨边界深度）、slot 来源（分配 / fallback）、未分配、closed 不可确定。
+   */
+  function appendShadowBadges(container, e) {
+    var sh = e.shadow;
+    if (!sh) return;
+    var reasonCodes = (e.reasons || []).map(function (r) { return r.code; });
+    var undetermined = reasonCodes.indexOf('shadow-closed-undetermined') >= 0;
+
+    if (undetermined) {
+      var bClosed = document.createElement('span');
+      bClosed.className = 'badge shadow-closed';
+      bClosed.textContent = 'closed · 不可检查';
+      bClosed.title = '位于 closed Shadow Root 宿主轻 DOM 中，slot 分配与内部组合树不可检查，不猜测是否进入 Tab 顺序';
+      container.appendChild(bClosed);
+    }
+
+    (sh.hosts || []).forEach(function (h, i) {
+      var b = document.createElement('span');
+      b.className = 'badge shadow-host';
+      b.textContent = '▣ ' + h.label;
+      b.title = '宿主链第 ' + (i + 1) + ' 层：' + h.selector;
+      container.appendChild(b);
+    });
+
+    (sh.slots || []).forEach(function (ev) {
+      var b = document.createElement('span');
+      b.className = 'badge slot-' + ev.via;
+      b.textContent = (ev.via === 'fallback' ? '↲ fallback ' : (ev.via === 'forward' ? '⇢ 转发槽 ' : '⇥ slot ')) + ev.label;
+      b.title = ev.via === 'fallback'
+        ? '该 slot 未分配节点，当前节点是其 fallback 内容：' + ev.selector
+        : '经 <slot> 分配进入组合树（' + (ev.name ? 'name="' + ev.name + '"' : '默认槽') + '）：' + ev.selector;
+      container.appendChild(b);
+    });
+
+    if (reasonCodes.indexOf('shadow-unassigned') >= 0) {
+      var bU = document.createElement('span');
+      bU.className = 'badge slot-unassigned';
+      bU.textContent = '未分配 · 不渲染';
+      container.appendChild(bU);
+    }
   }
 
   function renderResults() {
@@ -299,6 +458,8 @@
         line.appendChild(b0);
       }
       btn.appendChild(line);
+
+      appendShadowBadges(btn, e);
 
       var sel = document.createElement('span');
       sel.className = 'sel';
@@ -341,10 +502,14 @@
       title.textContent = e.label + ' ';
       var tag = document.createElement('span');
       tag.className = 'badge';
-      tag.textContent = e.status === 'programmatic' ? 'tabindex<0' :
-        (e.status === 'excluded' ? '已排除' : '提示');
+      var closedUndetermined = (e.reasons || []).some(function (r) { return r.code === 'shadow-closed-undetermined'; });
+      tag.textContent = closedUndetermined ? '不可确定' :
+        (e.status === 'programmatic' ? 'tabindex<0' :
+        (e.status === 'excluded' ? '已排除' : '提示'));
       title.appendChild(tag);
       box.appendChild(title);
+
+      appendShadowBadges(box, e);
 
       (e.reasons || []).forEach(function (r) {
         var rEl = document.createElement('span');
@@ -616,7 +781,8 @@
           status: e.status,
           step: e.step,
           tabIndex: e.tabIndex,
-          domIndex: e.domIndex
+          domIndex: e.domIndex,
+          shadow: e.shadow || null
         };
       })
     };
@@ -853,11 +1019,16 @@
           step: e.step,
           tabIndex: e.tabIndex,
           domIndex: e.domIndex,
+          // 组合树位置：宿主链（hosts）/ slot 来源（slots，分配·转发·fallback）/
+          // 是否处于 fallback 子树 / 是否位于 closed 宿主轻 DOM
+          shadow: e.shadow || null,
           reasons: (e.reasons || []).map(function (r) { return { code: r.code, message: r.message }; }),
           warnings: (e.warnings || []).map(function (w) { return { code: w.code, message: w.message }; })
         };
       }),
       diagnostics: state.diagnostics,
+      // Shadow DOM / slot 组合树分析汇总（open/closed 根、分配/fallback/未分配计数）
+      shadowDom: (state.stats && state.stats.shadow) ? state.stats.shadow : null,
       // 模态焦点陷阱审计：活动模态身份 / 循环顺序 / 泄漏节点 / 审计诊断（无活动模态时为 null）
       modalAudit: state.modalAudit ? {
         activeModal: state.modalAudit.activeModal,

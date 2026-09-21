@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/analyzer.test.js && node test/diff.test.js",
+    "test": "node test/analyzer.test.js && node test/shadow.test.js && node test/diff.test.js",
     "smoke": "node test/smoke.js"
   },
   "engines": {
