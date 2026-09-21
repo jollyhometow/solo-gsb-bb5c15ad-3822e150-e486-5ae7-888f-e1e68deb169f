@@ -201,6 +201,15 @@ textarea:focus { outline: 2px solid var(--accent-2); outline-offset: -1px; }
 }
 .badge.positive { background: #3d2b12; color: var(--warn); }
 
+/* ---------------- Shadow DOM / slot 组合树徽章 ---------------- */
+
+.node-item .comp { color: var(--muted); font-size: 11.5px; display: block; margin-top: 2px; }
+.badge.comp-badge { margin-left: 6px; }
+.badge.comp-badge.shadow { background: #12352b; color: var(--ok); }
+.badge.comp-badge.slotted { background: #1d2b45; color: #7dd3fc; }
+.badge.comp-badge.fallback { background: #3a2f12; color: var(--warn); }
+.reason.slot-unassigned { background: #22304d; color: #7dd3fc; }
+
 .reason {
   display: inline-block;
   margin: 2px 6px 0 0;

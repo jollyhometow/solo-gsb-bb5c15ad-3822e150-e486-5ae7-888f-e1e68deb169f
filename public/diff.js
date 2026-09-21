@@ -129,7 +129,9 @@
       statusLabel: statusLabel(n.status),
       step: n.step || null,
       tabIndex: n.tabIndex === undefined ? null : n.tabIndex,
-      identity: n.identity || null
+      identity: n.identity || null,
+      // 组合树信息（宿主链 / slot 来源）：随差异快照一起保留，导出 JSON 不丢字段
+      composition: n.composition || null
     };
   }
 

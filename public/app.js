@@ -64,11 +64,12 @@
   var state = {
     analyzerSrc: null,   // analyzer.js 源码文本
     entries: [],         // 最近一次路线节点
-    order: [],           // selector 数组（Tab 顺序）
+    order: [],           // selector 数组（Tab 顺序，跨边界为分段选择器）
     diagnostics: [],
     stats: null,
+    shadow: null,        // 最近一次 Shadow DOM 组合树信息
     currentStep: -1,     // 当前高亮在顺序中的下标
-    restoreSelector: null, // 待恢复的稳定选择器
+    restoreSelector: null, // 待恢复的分段选择器
     routeTimer: null,    // 路线响应超时计时器
     baseline: null,      // 已钉住的基线快照 { pinnedAt, stats, entries }
     diff: null,          // 最近一次基线对比结果（FocusDiff.diffRoutes 返回值）
@@ -79,9 +80,29 @@
   /* ---------------- 示例输入 ---------------- */
 
   var SAMPLE_HTML = [
-    '<h1>示例：注册表单</h1>',
+    '<h1>示例：注册表单 + Shadow DOM 组件</h1>',
     '<button>第一个按钮</button>',
     '<a href="#">普通链接</a>',
+    '<!-- 声明式 open Shadow Root：Tab 路线按组合树展开，slot 分配节点参与，未分配的轻 DOM 不计入 -->',
+    '<my-card id="card">',
+    '  <template shadowrootmode="open">',
+    '    <style>div { padding: 8px; border: 2px solid #16a34a; border-radius: 8px; }</style>',
+    '    <h3>卡片（shadow 内部标题）</h3>',
+    '    <label>shadow 内输入框 <input type="text" placeholder="shadow input"></label>',
+    '    <slot name="actions"><button>slot fallback 按钮（未分配时使用）</button></slot>',
+    '    <p>下面是没有对应 slot 的默认槽：</p>',
+    '  </template>',
+    '  <button slot="actions">被分配到 name=actions 的按钮（slotted）</button>',
+    '  <a href="#" slot="actions">另一个被分配的链接</a>',
+    '  <button>未分配的轻 DOM 按钮（无对应 slot，不渲染、不计入）</button>',
+    '</my-card>',
+    '<!-- 声明式闭合 Shadow Root：内部不可检查，明确标注而非猜测 -->',
+    '<my-secret data-note="closed-host">',
+    '  <template shadowrootmode="closed">',
+    '    <button>闭合 root 内部按钮（实验室无法检查）</button>',
+    '  </template>',
+    '  <button>闭合宿主的轻 DOM 按钮（仍正常分析）</button>',
+    '</my-secret>',
     '<input type="text" placeholder="用户名">',
     '<button tabindex="3">正数 tabindex=3</button>',
     '<button tabindex="1">正数 tabindex=1（插队到最前）</button>',
@@ -118,43 +139,137 @@
     'button, a, input, summary, div[tabindex] { display: inline-block; margin: 4px; padding: 4px 8px; }',
     '.gone { display: none; }',
     '.demo-modal { display: block; margin: 8px 0; padding: 10px; border: 2px solid #4f8cff; border-radius: 6px; background: #eef4ff; }',
+    'my-card, my-secret { display: block; margin: 8px 0; }',
+    'my-secret { padding: 8px; border: 2px dashed #b91c1c; border-radius: 8px; }',
     ':focus { outline: 2px dashed #4f8cff; }'
   ].join('\n');
 
   /* ---------------- 净化：剥离用户脚本 ---------------- */
 
   /**
-   * 用 DOMParser 解析（不会执行脚本），移除：
-   *  - <script>、<base>、<meta http-equiv>（如 refresh 跳转）
-   *  - 所有 on* 事件属性
-   *  - javascript: / data:text/html 协议的链接类属性
-   *  - srcdoc（防止注入未净化的嵌套文档）
+   * 净化单个元素上的危险属性：所有 on* 事件属性、srcdoc、危险协议链接。
    */
-  function sanitizeHtml(html) {
-    var doc = new DOMParser().parseFromString(html, 'text/html');
-    var kill = doc.querySelectorAll('script, base, meta[http-equiv]');
-    for (var i = 0; i < kill.length; i++) kill[i].remove();
-
-    var all = doc.querySelectorAll('*');
-    for (var j = 0; j < all.length; j++) {
-      var el = all[j];
-      var attrs = Array.prototype.slice.call(el.attributes);
-      for (var k = 0; k < attrs.length; k++) {
-        var name = attrs[k].name.toLowerCase();
-        var compact = String(attrs[k].value).replace(/[\s\x00-\x1F]+/g, '').toLowerCase();
-        if (name.indexOf('on') === 0) {
-          el.removeAttribute(attrs[k].name);
-        } else if (name === 'srcdoc') {
-          el.removeAttribute(attrs[k].name);
-        } else if (
-          (name === 'href' || name === 'src' || name === 'xlink:href' ||
-           name === 'formaction' || name === 'action' || name === 'poster') &&
-          (compact.indexOf('javascript:') === 0 || compact.indexOf('data:text/html') === 0)
-        ) {
-          el.removeAttribute(attrs[k].name);
-        }
+  function stripDangerousAttributes(el) {
+    var attrs = Array.prototype.slice.call(el.attributes);
+    for (var k = 0; k < attrs.length; k++) {
+      var attrName = attrs[k].name.toLowerCase();
+      var compact = String(attrs[k].value).replace(/[\s\x00-\x1F]+/g, '').toLowerCase();
+      if (attrName.indexOf('on') === 0) {
+        el.removeAttribute(attrs[k].name);
+      } else if (attrName === 'srcdoc') {
+        el.removeAttribute(attrs[k].name);
+      } else if (
+        (attrName === 'href' || attrName === 'src' || attrName === 'xlink:href' ||
+         attrName === 'formaction' || attrName === 'action' || attrName === 'poster') &&
+        (compact.indexOf('javascript:') === 0 || compact.indexOf('data:text/html') === 0)
+      ) {
+        el.removeAttribute(attrs[k].name);
       }
     }
+  }
+
+  /**
+   * 递归净化一棵已解析的 DOM 树（容器本身之外的全部元素）：
+   *  - 移除 <script>、<base>、<meta http-equiv>；
+   *  - 进入 open Shadow Root（含声明式 shadowrootmode="open" 升级产生的 root）
+   *    与尚未被解析器消费的 <template>.content，确保 shadow 内部的脚本同样被剥离。
+   * 闭合 Shadow Root 无法经 DOM API 访问，其内部净化在字符串阶段完成
+   * （见 sanitizeHtml 中的 FocusShdom 扫描）。
+   */
+  function stripTree(root) {
+    var kill = root.querySelectorAll('script, base, meta[http-equiv]');
+    for (var i = 0; i < kill.length; i++) kill[i].remove();
+
+    var all = root.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) {
+      var el = all[j];
+      stripDangerousAttributes(el);
+      // querySelectorAll 不进入 shadow root，需手动递归
+      if (el.shadowRoot) stripTree(el.shadowRoot);
+      // 未被消费的 <template shadowrootmode>（引擎不支持 DSD 时）或普通模板
+      if (el.tagName === 'TEMPLATE' && el.content) stripTree(el.content);
+    }
+  }
+
+  /**
+   * 净化闭合 DSD 模板【内部】片段：包进一个普通 <template> 后用 DOMParser 解析
+   * （内部不会执行任何脚本），递归净化后返回内部 HTML 文本。
+   */
+  function sanitizeClosedFragment(innerHtml) {
+    var wrap = new DOMParser().parseFromString(
+      '<!DOCTYPE html><html><body><template>' + innerHtml + '</template></body></html>',
+      'text/html'
+    );
+    var tpl = wrap.querySelector('template');
+    if (!tpl) return '';
+    stripTree(tpl.content);
+    return tpl.innerHTML;
+  }
+
+  /**
+   * 用户 HTML 净化总入口：
+   *  1. 字符串阶段（解析前）：定位全部 <template shadowrootmode="closed">——
+   *     它们解析后无法访问——给其宿主注入 data-focus-lab-closed-root 标注
+   *     （analyzer 据此把闭合 root 明确标为「不可检查」），并对其内部 HTML 做净化；
+   *  2. DOM 阶段（DOMParser，不执行脚本）：剥离脚本/危险属性，并递归进入
+   *     open shadow root 与 <template>.content。
+   */
+  function sanitizeHtml(html) {
+    var closed = FocusShdom.findClosedShadowRoots(html);
+
+    // 建立闭合模板区间的嵌套关系（嵌套 closed DSD 也可能出现在 closed 内部）
+    var spans = closed.spans.map(function (sp, idx) {
+      sp.children = [];
+      sp.parent = null;
+      for (var p = 0; p < idx; p++) {
+        var cand = closed.spans[p];
+        // 用【内部区间】判定包含：外层模板的 start 早于内层 start，不能用 start 比较
+        if (sp.innerStart >= cand.innerStart && sp.innerEnd <= cand.innerEnd && sp !== cand) {
+          // 取最近的祖先（内部起点最大者）
+          if (!sp.parent || cand.innerStart > sp.parent.innerStart) sp.parent = cand;
+        }
+      }
+      if (sp.parent) sp.parent.children.push(sp);
+      return sp;
+    });
+
+    // 自内而外生成各 span 的净化文本（子区间偏移相对当前内部）
+    function cleanSpan(sp) {
+      var inner = html.slice(sp.innerStart, sp.innerEnd);
+      sp.children.slice().sort(function (a, b) { return b.start - a.start; }).forEach(function (ch) {
+        var from = ch.innerStart - sp.innerStart;
+        var to = ch.innerEnd - sp.innerStart;
+        inner = inner.slice(0, from) + cleanSpan(ch) + inner.slice(to);
+      });
+      return sanitizeClosedFragment(inner);
+    }
+
+    // 按位置从后往前应用编辑，避免偏移失效；宿主标注与顶层闭合模板替换互不重叠。
+    // 注意：位于某个闭合区间【内部】的宿主标记不注入属性——该宿主整个子树都在闭合
+    // root 内、解析后不可访问；其内部内容仍会经由区间净化处理。
+    function insideClosedSpan(pos) {
+      for (var i = 0; i < spans.length; i++) {
+        if (pos > spans[i].tagEnd && pos < spans[i].innerEnd) return true;
+      }
+      return false;
+    }
+    var edits = [];
+    closed.markers.slice().sort(function (a, b) { return a.pos - b.pos; }).forEach(function (m) {
+      if (!insideClosedSpan(m.pos)) {
+        edits.push({ pos: m.pos, end: null, text: ' ' + FocusShdom.CLOSED_ROOT_ATTR + '=""' });
+      }
+    });
+    spans.filter(function (sp) { return !sp.parent; }).forEach(function (sp) {
+      edits.push({ pos: sp.innerStart, end: sp.innerEnd, text: cleanSpan(sp) });
+    });
+    edits.sort(function (a, b) { return b.pos - a.pos; });
+    var out = html;
+    edits.forEach(function (ed) {
+      out = out.slice(0, ed.pos) + ed.text + (ed.end ? out.slice(ed.end) : out.slice(ed.pos));
+    });
+
+    var doc = new DOMParser().parseFromString(out, 'text/html');
+    stripTree(doc);
     return doc.documentElement.outerHTML;
   }
 
@@ -227,17 +342,21 @@
     state.order = payload.order || [];
     state.diagnostics = payload.diagnostics || [];
     state.modalAudit = payload.modalAudit || null;
+    state.shadow = payload.shadow || null;
     state.stats = payload.stats || null;
     state.currentStep = -1;
     renderResults();
     refreshDiff();
-    setStatus('已计算：' + state.order.length + ' 个可聚焦节点', 'ok');
+    var sh = (state.shadow && state.shadow.stats) || null;
+    setStatus('已计算：' + state.order.length + ' 个可聚焦节点' +
+      (sh && sh.openRoots ? '（' + sh.openRoots + ' 个 open shadow root' +
+        (sh.closedRoots ? '，' + sh.closedRoots + ' 个闭合不可检查' : '') + '）' : ''), 'ok');
 
-    // 按稳定选择器恢复编辑前的位置
+    // 按分段选择器恢复编辑前的位置（跨 shadow 边界也可往返定位）
     if (state.restoreSelector) {
       var idx = state.order.indexOf(state.restoreSelector);
       if (idx >= 0) {
-        els.restoreHint.textContent = '已按稳定选择器恢复到位置 ' + (idx + 1) + '：' + state.restoreSelector;
+        els.restoreHint.textContent = '已按分段选择器恢复到位置 ' + (idx + 1) + '：' + state.restoreSelector;
         sendToFrame({ type: 'highlight', step: idx });
       } else {
         els.restoreHint.textContent = '原节点（' + state.restoreSelector + '）已不在 Tab 顺序中，未恢复。';
@@ -261,6 +380,50 @@
       if (state.entries[i].selector === selector) return state.entries[i];
     }
     return null;
+  }
+
+  /* ---------------- 组合树信息展示（Shadow DOM / slot） ---------------- */
+
+  /** 节点的组合徽章：shadow 内 / slotted / fallback */
+  function compositionBadges(e) {
+    var out = [];
+    var c = e.composition;
+    if (!c) return out;
+    if (c.tree === 'shadow') {
+      var sh = document.createElement('span');
+      sh.className = 'badge comp-badge shadow';
+      sh.textContent = 'shadow #' + c.depth;
+      out.push(sh);
+    } else if (c.tree === 'slotted') {
+      var sl = document.createElement('span');
+      sl.className = 'badge comp-badge slotted';
+      sl.textContent = 'slotted';
+      out.push(sl);
+    }
+    if (c.slot && c.slot.mode === 'fallback') {
+      var fb = document.createElement('span');
+      fb.className = 'badge comp-badge fallback';
+      fb.textContent = 'slot fallback';
+      out.push(fb);
+    }
+    return out;
+  }
+
+  /** 节点的组合来源文字：宿主链 + slot 来源 */
+  function compositionText(e) {
+    var c = e.composition;
+    if (!c) return '';
+    var bits = [];
+    if (c.hostChain && c.hostChain.length) {
+      bits.push('宿主链：' + c.hostChain.map(function (h) { return h.label; }).join(' › '));
+    }
+    if (c.slot) {
+      var slotName = c.slot.name ? '<slot name="' + c.slot.name + '">' : '<slot>（默认）';
+      bits.push(c.slot.mode === 'slotted'
+        ? '经 slot 分配：' + slotName
+        : '未分配，使用 fallback：' + slotName);
+    }
+    return bits.join(' · ');
   }
 
   function renderResults() {
@@ -287,6 +450,7 @@
       no.textContent = String(i + 1);
       line.appendChild(no);
       line.appendChild(document.createTextNode(' ' + e.label));
+      compositionBadges(e).forEach(function (b) { line.appendChild(b); });
       if (e.tabIndex > 0) {
         var b = document.createElement('span');
         b.className = 'badge positive';
@@ -304,6 +468,14 @@
       sel.className = 'sel';
       sel.textContent = e.selector;
       btn.appendChild(sel);
+
+      var compText = compositionText(e);
+      if (compText) {
+        var cEl = document.createElement('span');
+        cEl.className = 'comp';
+        cEl.textContent = compText;
+        btn.appendChild(cEl);
+      }
 
       if (e.text) {
         var t = document.createElement('span');
@@ -339,6 +511,7 @@
 
       var title = document.createElement('span');
       title.textContent = e.label + ' ';
+      compositionBadges(e).forEach(function (b) { title.appendChild(b); });
       var tag = document.createElement('span');
       tag.className = 'badge';
       tag.textContent = e.status === 'programmatic' ? 'tabindex<0' :
@@ -348,7 +521,7 @@
 
       (e.reasons || []).forEach(function (r) {
         var rEl = document.createElement('span');
-        rEl.className = 'reason';
+        rEl.className = 'reason' + (r.code === 'slot-unassigned' ? ' slot-unassigned' : '');
         rEl.textContent = r.message;
         box.appendChild(rEl);
       });
@@ -363,6 +536,14 @@
       sel2.className = 'sel';
       sel2.textContent = e.selector;
       box.appendChild(sel2);
+
+      var compText = compositionText(e);
+      if (compText) {
+        var cEl = document.createElement('span');
+        cEl.className = 'comp';
+        cEl.textContent = compText;
+        box.appendChild(cEl);
+      }
 
       li.appendChild(box);
       els.excludedList.appendChild(li);
@@ -616,7 +797,8 @@
           status: e.status,
           step: e.step,
           tabIndex: e.tabIndex,
-          domIndex: e.domIndex
+          domIndex: e.domIndex,
+          composition: e.composition || null
         };
       })
     };
@@ -841,7 +1023,9 @@
           selector: selector,
           label: e.label || null,
           tabIndex: e.tabIndex === undefined ? null : e.tabIndex,
-          text: e.text || ''
+          text: e.text || '',
+          // 组合树定位：宿主链 / slot 来源（跨 open shadow 边界节点 selector 为分段形式）
+          composition: e.composition || null
         };
       }),
       nodes: state.entries.map(function (e) {
@@ -853,11 +1037,21 @@
           step: e.step,
           tabIndex: e.tabIndex,
           domIndex: e.domIndex,
+          composition: e.composition || null,
           reasons: (e.reasons || []).map(function (r) { return { code: r.code, message: r.message }; }),
           warnings: (e.warnings || []).map(function (w) { return { code: w.code, message: w.message }; })
         };
       }),
       diagnostics: state.diagnostics,
+      // Shadow DOM / slot 组合树分析：open root 展开、闭合边界、slot 分配与未分配统计
+      shadowDom: state.shadow ? {
+        stats: state.shadow.stats,
+        openRoots: state.shadow.openRoots,
+        closedRoots: state.shadow.closedRoots,
+        unassigned: state.shadow.unassigned,
+        declarativeShadowDomSupported: state.shadow.dsdSupported,
+        leftoverTemplates: state.shadow.leftoverTemplates
+      } : null,
       // 模态焦点陷阱审计：活动模态身份 / 循环顺序 / 泄漏节点 / 审计诊断（无活动模态时为 null）
       modalAudit: state.modalAudit ? {
         activeModal: state.modalAudit.activeModal,

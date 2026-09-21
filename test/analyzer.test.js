@@ -10,6 +10,7 @@ const {
   parseTabIndexValue,
   computeOrder,
   buildDiagnostics,
+  buildShadowDiagnostics,
   pickActiveModal,
   computeModalCycle,
   buildModalDiagnostics
@@ -104,6 +105,55 @@ test('节点级 warning 透传到全局诊断', () => {
   ];
   const diags = buildDiagnostics(entries, computeOrder(entries));
   assert.ok(diags.some(d => d.code === 'aria-hidden-focusable'));
+});
+
+console.log('buildShadowDiagnostics');
+test('无信息 → 无诊断', () => {
+  assert.deepStrictEqual(buildShadowDiagnostics(null), []);
+  assert.deepStrictEqual(buildShadowDiagnostics({}), []);
+});
+test('open root → info 诊断且声明按组合树展开', () => {
+  const diags = buildShadowDiagnostics({
+    openRoots: [{ label: 'my-card', slotted: 2, fallback: 1, delegatesFocus: false }],
+    closedRoots: [], unassigned: []
+  });
+  const d = diags.find(x => x.code === 'open-shadow-root');
+  assert.ok(d && d.level === 'info');
+  assert.ok(d.message.includes('my-card') && d.message.includes('2 个 slotted') && d.message.includes('1 个 fallback'));
+});
+test('闭合 Shadow Root → warn，明确「不可检查」而非猜测内部', () => {
+  const diags = buildShadowDiagnostics({
+    openRoots: [],
+    closedRoots: [{ label: 'my-secret', selector: 'my-secret' }],
+    unassigned: []
+  });
+  const d = diags.find(x => x.code === 'closed-shadow-root');
+  assert.ok(d && d.level === 'warn');
+  assert.ok(d.message.includes('闭合 Shadow Root') && d.message.includes('无法') && d.message.includes('my-secret'));
+});
+test('未分配轻 DOM 节点 → slot-unassigned 信息，声明不重复计入', () => {
+  const diags = buildShadowDiagnostics({
+    openRoots: [{ label: 'host', slotted: 0, fallback: 0 }],
+    closedRoots: [],
+    unassigned: [{ label: 'button.a' }, { label: 'button.b' }]
+  });
+  const d = diags.find(x => x.code === 'slot-unassigned');
+  assert.ok(d);
+  assert.ok(d.message.includes('2') && d.message.includes('button.a'));
+});
+test('引擎不支持 DSD 且存在残留模板 → dsd-unsupported 警告', () => {
+  const diags = buildShadowDiagnostics({
+    dsdSupported: false, leftoverTemplates: 1, openRoots: [], closedRoots: [], unassigned: []
+  });
+  assert.ok(diags.some(d => d.code === 'dsd-unsupported' && d.level === 'warn'));
+});
+test('支持 DSD 时即使有模板也不告警；跨树正值 tabindex 给出提示', () => {
+  const diags = buildShadowDiagnostics({
+    dsdSupported: true, leftoverTemplates: 1, crossScopePositives: 2,
+    openRoots: [], closedRoots: [], unassigned: []
+  });
+  assert.ok(!diags.some(d => d.code === 'dsd-unsupported'));
+  assert.ok(diags.some(d => d.code === 'tabindex-cross-scope'));
 });
 
 console.log('pickActiveModal');

@@ -33,6 +33,8 @@ async function check(name, fn) {
     const body = await res.text();
     if (!body.includes('computeOrder')) throw new Error('分析脚本内容异常');
     if (!body.includes('computeModalCycle')) throw new Error('缺少模态审计逻辑');
+    if (!body.includes('buildShadowDiagnostics')) throw new Error('缺少 Shadow DOM 组合树诊断');
+    if (!body.includes('segmentedSelector')) throw new Error('缺少跨边界分段选择器');
   });
 
   await check('GET /diff.js 可加载', async () => {
@@ -40,6 +42,14 @@ async function check(name, fn) {
     if (!res.ok) throw new Error('status ' + res.status);
     const body = await res.text();
     if (!body.includes('diffRoutes')) throw new Error('基线对比脚本内容异常');
+  });
+
+  await check('GET /shdom.js 可加载（声明式 Shadow DOM 工具）', async () => {
+    const res = await fetch(BASE + '/shdom.js');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const body = await res.text();
+    if (!body.includes('findClosedShadowRoots')) throw new Error('缺少闭合 Shadow Root 字符串扫描');
+    if (!body.includes('shadowrootmode')) throw new Error('缺少声明式 Shadow DOM 处理');
   });
 
   await check('GET /api/health', async () => {
